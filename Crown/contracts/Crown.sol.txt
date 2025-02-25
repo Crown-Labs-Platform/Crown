@@ -1,0 +1,987 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+
+contract Crown is ReentrancyGuard {
+
+    string public name = "Crown"; // Name token
+    string public symbol = "CRW"; // Symbol token
+    uint8 public constant decimals = 18; // Decimals
+    uint256 public totalSupply = 21000000000 * (10 ** uint256(decimals)); // 21 billion total supply
+
+    address public owner; // Address owner
+    
+    uint256 public reserveTokens; // Token reserves for liquidity management
+    uint256 public reserveETH; // ETH reserves for stability
+    uint256 public tokenPriceBase; // Base price token
+
+    uint256 public totalSoldTokens; // New token tracking variable
+
+    bool public useOraclePrice = false; // Switch to use oracle prices
+    uint256 public oraclePrice; // Price oracle
+    AggregatorV3Interface internal priceFeed;  // Declares a state variable 'priceFeed' of type AggregatorV3Interface to interact with a price feed contract
+    
+    uint256 public constant reserveAllocation = 12000000000 * (10 ** decimals); // 12 billion tokens to reserves resere tokens
+    uint256 public constant ownerAllocation = 6000000000 * (10 ** decimals); // 6 billion tokens to the owner
+    uint256 public constant rewardPoolInitialAllocation = 3000000000 * (10 ** decimals); // 3 billion to rewardPool
+
+
+    uint256 public rewardPool; // Pool for reward
+    
+    // Stake Rate % -- 1 = 0.01% / 100 = 1%
+    uint256 public DAILY_REWARD_RATE = 2; // 0.02 % as 2 
+
+    //Transaction Fee % -- 1 = 0.01% / 100 = 10% 
+    uint256 public transactionFeeRate = 10; // 10 = 1%
+
+    //Loans Rate % -- 1 = 0.01% / 100 = 1%
+    uint256 public dailyInterestRate = 2; // Daily interest rate 0.02% 
+
+    // Max Days Loan
+    uint256 public maxLoanDuration = 365 days; // Max loan duration time max 1 year = 365 days
+
+
+
+    struct StakerInfo {
+        uint256 stakedAmount; // Total stake amount
+        uint256 lastClaimedTime; // Last claimed time reward
+        uint256 totalClaimedRewards;
+    }
+
+
+    struct Validator {
+        address validatorAddress; // Validators address
+        uint256 stake; // Validators stake
+        uint256 rewards; // Validator rewards
+    }
+
+    struct Loan {
+        uint256 collateralWei; // Amount of ETH locked as collateral
+        uint256 loanAmount; // Amount of borrowered tokens
+        uint256 duration; // Loan duration in seconds
+        uint256 startTime; // Loan creation time
+        bool isActive; // Loan status
+    }
+
+    struct UserLoan {
+        address lender; // Loan provider
+        address borrower; // Loan applicant 
+        uint256 collateralTokens; // Locked collateral
+        uint256 loanAmount; // Borrowed amount
+        uint256 interestRate; // Daily interest rate set by the provider
+        uint256 startTime; // Creation time 
+        uint256 loanDuration; // Loan duration in seconds
+        bool isActive; // User loan status
+    }
+
+
+
+    mapping(address => uint256) public balanceOf; // Total balance
+    mapping(address => mapping(address => uint256)) public allowance; // Approved token amount per spender
+    mapping(address => StakerInfo) public stakerInfo; // Tracking staker information
+    mapping(address => Loan) public loans; // Active loans per borrower
+    mapping(address => UserLoan) public userLoans; // Loan details for each user
+    mapping(address => address) public borrowerToLender; // Lender assigned to each borrower
+
+    Validator[] public validators; // List of registered validators
+
+
+    event TransactionFeeRateUpdated(uint256 oldRate, uint256 newRate);
+    event UseOraclePriceUpdated(address indexed owner, bool newStatus);
+    event TokensBought(address indexed buyer, uint256 ethAmount, uint256 tokensBought, uint256 feeInBaseUnits, uint256 ownerFee, uint256 rewardPoolFee, uint256 validatorsFee);
+    event TokensSold(address indexed seller, uint256 tokenAmount, uint256 ethAmount, uint256 tokensAfterFee, uint256 ownerFee, uint256 rewardPoolFee, uint256 validatorsFee);
+    event Transfer(address indexed from, address indexed to, uint256 amount);
+    event OwnerFeeTransferred(address indexed from, address indexed owner, uint256 feeAmount);
+    event RewardPoolFeeTransferred(address indexed from, uint256 feeAmount);
+    event ValidatorFeesDistributed(uint256 totalValidatorFee, uint256 individualValidatorShare);
+    event TokenPriceUpdated(uint256 newPrice);
+    event Approval(address indexed owner, address indexed spender, uint256 amount);
+    event FeeDistributed(address indexed from, uint256 ownerFee, uint256 rewardPoolFee, uint256 validatorsFee);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event Staked(address indexed staker, uint256 amountStaked);
+    event RewardsClaimed(address indexed staker, uint256 rewardsClaimed);
+    event Unstaked(address indexed staker, uint256 amountUnstaked);
+    event DailyRewardRateUpdated(uint256 oldRate, uint256 newRate);
+    event ValidatorAdded(address indexed validatorAddress, uint256 stakedAmount);
+    event ValidatorRemoved(address indexed validatorAddress);
+    event RewardsWithdrawn(address indexed validator, uint256 amount);
+    event LoanCreated(address indexed borrower, uint256 collateralWei, uint256 loanAmountInBaseUnits);
+    event LoanRepaid(address indexed borrower, uint256 collateralReturned, uint256 totalRepaymentInBaseUnits);
+    event CollateralLiquidated(address indexed borrower, uint256 collateralWei);
+    event DailyInterestRateUpdated(uint256 newRate);
+    event UserLoanCreated(address indexed lender, address indexed borrower, uint256 loanAmount, uint256 interestRate, uint256 loanDuration);
+    event UserLoanActivated(address indexed borrower, uint256 collateralAmount, uint256 loanAmount);
+    event UserLoanRepaid(address indexed borrower, address indexed lender, uint256 totalRepaymentAmount, uint256 remainingCollateral);
+    event UserLoanLiquidated(address indexed borrower, address indexed lender, uint256 totalCollateral, uint256 lenderShare, uint256 ownerShare, uint256 rewardPoolShare, uint256 liquidationTimestamp);
+    event UserLoanCancelled(address indexed lender);
+    event RewardPoolTransferredToReserve(uint256 amountTransferred, uint256 feeAmount, uint256 amountAfterFee);
+    event ReserveTransferredToRewardPool(uint256 amountTransferred, uint256 feeAmount, uint256 amountAfterFee);
+
+
+
+    constructor(address _priceFeed) { // Constructor to initialize the contract with the address of the price feed contract
+
+        owner = msg.sender; // Set the contract deployer's address as the owner of the contract
+
+        priceFeed = AggregatorV3Interface(_priceFeed); // Initialize the priceFeed contract with the provided address, allowing interaction with the Chainlink price feed
+
+       // 12 billion tokens
+        reserveTokens = reserveAllocation; // Set the initial reserveTokens value to the specified reserveAllocation amount
+        
+        // 3 billion tokens
+        rewardPool = rewardPoolInitialAllocation; // Set the initial rewardPool value to the specified rewardPoolInitialAllocation amount
+        
+        // 0.00001 eth za 1 token (10000000000000000 wei)
+        tokenPriceBase = 0.00001 ether; // Set the base price of the token to ether
+
+        // 6 billion tokens
+        balanceOf[owner] = ownerAllocation; // Assign the owner's balance to the specified allocation amount
+
+        emit Transfer(address(0), owner, ownerAllocation); // Record allocation to owner
+    }
+    
+    // Modifier to check and grant access to the contract owner
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not the contract owner");
+        _;
+    }
+
+    // Modifier to check if the caller is a validator
+    modifier onlyValidator() {
+        bool isValidator = false; // Initialize a flag to track if the caller is a validator
+        for (uint256 i = 0; i < validators.length; i++) { // Loop through the list of validators
+            if (validators[i].validatorAddress == msg.sender) { // Check if the caller's address is in the validator list
+                isValidator = true; // If found, set the flag to true
+                break; // Exit the loop as the validator has been found
+            }
+        }
+        require(isValidator, "You are not a validator"); // If the caller is not a validator, revert the transaction
+        _;
+    }
+
+    // Modifier to check if the borrower has no active loan
+    modifier hasNoActiveLoan() {
+        require(!loans[msg.sender].isActive, "You already have an active loan"); // Ensure the caller does not have an active loan
+        _;
+    }
+
+
+    // Setting the transaction fee
+    function setTransactionFeeRate(uint256 newRate) external onlyOwner {
+        require(newRate > 0 && newRate <= 100, "Invalid fee rate"); // Ensures the fee rate is between 0 and 1000
+    
+        uint256 oldRate = transactionFeeRate; // Store the current transaction fee rate
+        transactionFeeRate = newRate; // Update the transaction fee rate to the new value
+
+        emit TransactionFeeRateUpdated(oldRate, newRate); // Emit an event to log the old and new transaction fee rates
+    }
+
+
+    function setUseOraclePrice(bool _useOraclePrice) external onlyOwner { 
+        useOraclePrice = _useOraclePrice; // Aktualizuje hodnotu useOraclePrice
+        emit UseOraclePriceUpdated(msg.sender, _useOraclePrice); // Emituje event s informací o změně
+    }
+
+    // Returns the current market price, accessible by anyone
+    function getMarketPrice() public view returns (int) { 
+        (,int price,,,) = priceFeed.latestRoundData(); // Fetches the latest price from the price feed and stores it in 'price'
+        return price; // Returns the fetched price from the price feed
+    }
+
+    // Internal function to retrieve the current token price
+    function _getCurrentTokenPrice() internal view returns (uint256) {
+        if (useOraclePrice) { // Check if the oracle price should be used for the token price
+            int marketPrice = getMarketPrice(); // Retrieves the current market price from the oracle
+            return marketPrice > 0 ? uint256(marketPrice) : tokenPriceBase; // Returns the market price if it's greater than 0, otherwise returns the default token price
+        } else {
+            return tokenPriceBase; // Returns the default token price if oracle price is not used
+        }
+    }
+    
+    // Returns the current token price, either from the oracle or the default base price
+    function getCurrentTokenPrice() public view returns (uint256) {
+        return _getCurrentTokenPrice(); // Returns the current token price by calling the internal function _getCurrentTokenPrice
+    }
+
+
+    // Internal function to update the token price based on the transaction type (buy/sell) and the amount
+    function _updateTokenPrice(uint256 tokenAmount, bool isBuy) internal {
+        uint256 adjustment = (tokenAmount / (10 ** uint256(decimals))) * 0.000000013 ether; // Calculate price adjustment based on the token amount and apply the specified ether factor (0.000000013)
+        if (isBuy) {
+            tokenPriceBase += adjustment; // Increase the token price if it's a buy operation
+        } else { // Proceed with the else block if it's a sell operation
+            if (tokenPriceBase > adjustment) {
+                tokenPriceBase -= adjustment; // Decrease the token price if the adjustment is smaller than the base price
+            } else {
+                tokenPriceBase = 0; // Set the token price to 0 if the adjustment is greater than or equal to the base price
+            }
+        }
+        emit TokenPriceUpdated(tokenPriceBase); // Emit the event to update the token price
+    }
+
+    
+    // Allows users to buy tokens with ETH, ensuring no reentrancy attacks
+    function buyTokensWithETH(uint256 ethAmountInWei) external payable nonReentrant {
+
+        require(ethAmountInWei > 0, "You must send ETH to buy tokens"); // Ensures that the ETH amount sent is greater than 0
+
+        uint256 currentTokenPrice = _getCurrentTokenPrice(); // Fetches the current token price using internal function _getCurrentTokenPrice
+
+        // Calculate tokens to buy in base units (no need for decimal adjustment, it's in wei already)
+        uint256 tokensToBuy = (ethAmountInWei * (10 ** uint256(decimals))) / currentTokenPrice; // Calculates the number of tokens to buy based on ETH amount in wei
+
+        require(tokensToBuy <= reserveTokens, "Not enough tokens in reserve"); // Ensures that the amount of tokens to buy does not exceed the available tokens in the reserve
+
+        uint256 feeInBaseUnits = (tokensToBuy * transactionFeeRate) / 10000; // Calculates the transaction fee based on the token amount and transaction fee rate
+        uint256 tokensAfterFee = tokensToBuy - feeInBaseUnits; // Deducts the transaction fee from the total tokens to buy, resulting in the tokens to be transferred after fee
+
+        // Fee distribution to the respective accounts in percentages
+        uint256 ownerFee = (feeInBaseUnits * 15) / 100; // Calculates 15% of the fee to be allocated to the owner
+        uint256 rewardPoolFee = (feeInBaseUnits * 50) / 100; // Calculates 50% of the fee to be allocated to the reward pool
+        uint256 validatorsFee = (feeInBaseUnits * 35) / 100; // Calculates 35% of the fee to be allocated to validators
+
+        balanceOf[owner] += ownerFee; // Add owner's share of the fee to their balance
+        rewardPool += rewardPoolFee; // Add reward pool's share of the fee to the reward pool
+
+        // Distribution of fees among validators
+        if (validators.length > 0) { // Check if there are any validators
+            uint256 validatorShare = validatorsFee / validators.length; // Calculate the share of the fee for each validator
+            for (uint256 i = 0; i < validators.length; i++) { // Loop through all validators to distribute the fee share
+                validators[i].rewards += validatorShare; // Add the validator's share of the fee to their rewards balance
+            }
+        }
+
+        // Storing ETH and tokens
+        reserveETH += ethAmountInWei; // Add ETH to reserve (already in wei)
+        reserveTokens -= tokensToBuy; // Deduct purchased tokens from reserve
+        balanceOf[msg.sender] += tokensAfterFee; // Credit buyer's balance with tokens after fee
+
+        totalSoldTokens += tokensAfterFee; // Track total number of sold tokens
+
+        emit TokensBought(msg.sender, ethAmountInWei, tokensAfterFee, feeInBaseUnits, ownerFee, rewardPoolFee, validatorsFee);
+
+
+        // If the oracle is not enabled, update the token price in the contract
+        if (!useOraclePrice) {
+            _updateTokenPrice(tokensToBuy, true); // Price adjusts based on the transaction
+        }
+    }
+
+    // Selling tokens for ether
+    function sellTokensForETH(uint256 tokenAmount) external payable nonReentrant {
+
+        require(tokenAmount > 0, "You must sell more than 0 tokens"); // Ensure the token amount to sell is greater than 0.
+        require(balanceOf[msg.sender] >= tokenAmount, "Insufficient token balance"); // Ensure the sender has enough tokens to sell
+
+        uint256 tokenAmountInBaseUnits = tokenAmount * (10 ** uint256(decimals)); // Convert token amount to base units by adjusting for decimals
+
+        uint256 currentTokenPrice = _getCurrentTokenPrice(); // Retrieves the current token price using the internal function
+
+        uint256 ethAmount = (tokenAmountInBaseUnits * currentTokenPrice) / (1 ether * (10 ** uint256(decimals)));  // Calculates the equivalent amount of ETH based on the token amount and current token price
+        require(ethAmount <= reserveETH, "Not enough ETH in reserve"); // Ensures there is enough ETH in the reserve to complete the transaction
+
+        // Dynamic fee rounding
+        uint256 feeInBaseUnits = (tokenAmountInBaseUnits * transactionFeeRate + (transactionFeeRate / 2)) / 10000; // Calculates the transaction fee based on the token amount and the fee rate, with an added adjustment for rounding
+        uint256 tokensAfterFee = tokenAmountInBaseUnits - feeInBaseUnits; // Subtracts the transaction fee from the total token amount to determine the amount after the fee has been deducted
+
+        // Fee distribution with dynamic rounding
+        uint256 ownerFee = (feeInBaseUnits * 15 + 49) / 100; // Fee distribution with rounding: 15% to owner
+        uint256 rewardPoolFee = (feeInBaseUnits * 50 + 49) / 100; // 50% to reward pool
+        uint256 validatorsFee = feeInBaseUnits - ownerFee - rewardPoolFee; // and the remaining 35% to validators
+
+        // Add fees to respective accounts
+        balanceOf[owner] += ownerFee; // Add owner's fee to owner's balance
+        rewardPool += rewardPoolFee; // Add reward pool fee to the reward pool
+    
+        // Distribute fees among validators
+        if (validators.length > 0) {
+            uint256 validatorShare = validatorsFee / validators.length; // Calculate each validator's share of the fees
+            for (uint256 i = 0; i < validators.length; i++) { // Loop through each validator
+                validators[i].rewards += validatorShare; // Add the share to each validator's rewards
+            }
+        }
+
+        // Update of reserves and user account
+        reserveETH -= ethAmount; // Decrease the ETH reserve by the ETH amount
+        reserveTokens += tokenAmountInBaseUnits; // Increase the token reserve by the token amount in base units
+
+        balanceOf[msg.sender] -= tokenAmountInBaseUnits; // Decrease the sender's balance by the token amount in base units
+
+        totalSoldTokens -= tokensAfterFee; // Decrease the total sold tokens by the amount after the fee
+
+        // ETH payout to the user
+        payable(msg.sender).transfer(ethAmount); // Send the ETH amount to the sender's address
+
+        // Emit event
+        emit Transfer(msg.sender, address(this), tokenAmount); // Notify that tokens were transferred from the sender to the contract
+        emit TokensSold(msg.sender, tokenAmount, ethAmount, tokensAfterFee, ownerFee, rewardPoolFee, validatorsFee);
+
+        if (!useOraclePrice) { // Check if oracle price is not in use
+            _updateTokenPrice(tokensAfterFee, false); // Update token price based on the number of tokens sold
+        }
+    }
+
+
+    // Function to transfer tokens from the sender to another address
+    function transfer(address to, uint256 amountInBaseUnits) external nonReentrant returns (bool) { 
+        
+        // Ensures the transfer is safe from reentrancy attacks
+        require(to != address(0), "Cannot transfer to the zero address"); // Prevents transfers to the zero address
+        require(balanceOf[msg.sender] >= amountInBaseUnits, "Insufficient balance"); // Check if the sender has enough balance for the transfer
+
+        // Refresh the price based on the state of the Oracle or contract
+        uint256 currentPrice = _getCurrentTokenPrice(); // Get the current token price
+        emit TokenPriceUpdated(currentPrice); // Emit the event to inform about the new price
+
+        uint256 amountAfterFee = amountInBaseUnits - (amountInBaseUnits * 1) / 100; // Calculate the amount after the 1% fee deduction
+
+        // Update sender's and recipient's balances
+        balanceOf[msg.sender] -= amountInBaseUnits; // Sender loses the full amount
+        balanceOf[to] += amountAfterFee; // Recipient receives the amount after fee deduction
+
+        // Fee distribution
+        uint256 ownerFee = (amountInBaseUnits * 15) / 100; // 15% of the fee for the owner
+        balanceOf[owner] += ownerFee; // Adding the fee to the owner's balance
+
+        uint256 rewardPoolFee = (amountInBaseUnits * 50) / 100; // 50% of the fee for the reward pool
+        rewardPool += rewardPoolFee; // Adding the fee to the reward pool
+    
+        // Fee distribution for validators
+        uint256 validatorsFee = (amountInBaseUnits * 35) / 100; // 35% of the fee for validators
+        if (validators.length > 0) {
+            uint256 validatorShare = validatorsFee / validators.length; // Dividing the fee among all validators
+            for (uint256 i = 0; i < validators.length; i++) {
+                validators[i].rewards += validatorShare; // Adding rewards for each validator
+                emit ValidatorFeesDistributed(validatorsFee, validatorShare); // Emit event for validator fee distribution
+            }
+        }
+
+        // Emitting events for the transfer
+        emit Transfer(msg.sender, to, amountAfterFee); // Transfer the amount after fee
+        emit OwnerFeeTransferred(msg.sender, owner, ownerFee); // Owner fee transfer
+        emit RewardPoolFeeTransferred(msg.sender, rewardPoolFee); // Reward pool fee transfer
+
+        return true; // Indicating that the transfer was successful
+    }
+
+    // Function to approve tokens for spending
+    function approve(address spender, uint256 amountInBaseUnits) external returns (bool) { // Allows a spender to spend a specified amount of tokens
+        require(spender != address(0), "Cannot approve the zero address"); // Validates that the spender is not the zero address
+
+        // Set the allowance for the spender and emit the approval event
+        allowance[msg.sender][spender] = amountInBaseUnits; // Set the amount of tokens the spender is allowed to use on behalf of the sender
+        emit Approval(msg.sender, spender, amountInBaseUnits); // Emit the Approval event with the sender, spender, and the approved amount
+        return true; // Return true to indicate the approval was successfully set
+    }
+   
+    // Transfers tokens from one address to another, with allowance check
+    function transferFrom(address from, address to, uint256 amountInBaseUnits) external nonReentrant returns (bool) { 
+
+        require(from != address(0), "Cannot transfer from the zero address"); // Checks that the sender's address is not the zero address. Prevents transfers from a non-existent address
+        require(to != address(0), "Cannot transfer to the zero address"); // Checks that the recipient's address is not the zero address. Prevents transfers to a non-existent address
+        require(balanceOf[from] >= amountInBaseUnits, "Insufficient balance"); // Ensures the sender has enough tokens for the transfer (takes into account decimal places)
+        require(allowance[from][msg.sender] >= amountInBaseUnits, "Allowance exceeded"); // Checks that the sender has approved the caller (msg.sender) to transfer the specified amount
+
+        // Refresh the price based on the Oracle or contract state
+        uint256 currentPrice = _getCurrentTokenPrice(); // Fetch the current token price using the _getCurrentTokenPrice function
+        emit TokenPriceUpdated(currentPrice); // Emit an event to notify that the token price has been updated
+
+        // Calculate the fee
+        uint256 feeInBaseUnits = (amountInBaseUnits * transactionFeeRate) / 10000; // Calculate the fee based on the transaction fee rate (assumes fee rate is a percentage, divided by 10000 for precision)
+        uint256 amountAfterFee = amountInBaseUnits - feeInBaseUnits; // Subtract the fee from the original amount to get the amount after the fee is deducted
+
+        // Update balances
+        balanceOf[from] -= amountInBaseUnits; // Subtract the total amount (in base units) from the sender's balance
+        balanceOf[to] += amountAfterFee; // Add the amount after the fee is deducted to the recipient's balance
+
+        // Deduct from the allowance
+        allowance[from][msg.sender] -= amountInBaseUnits; // Subtract the transferred amount from the allowed spending limit of the sender's account for the caller (msg.sender)
+
+        // Split the fee
+        uint256 ownerFee = (feeInBaseUnits * 15) / 100; // Calculate the owner's share of the fee (15% of the total fee)
+        balanceOf[owner] += ownerFee; // Add the owner's fee to the owner's balance
+
+        uint256 rewardPoolFee = (feeInBaseUnits * 50) / 100; // Calculate the reward pool share of the fee (50% of the total fee)
+        rewardPool += rewardPoolFee; // Add the reward pool fee to the reward pool balance
+
+        uint256 validatorsFee = (feeInBaseUnits * 35) / 100; // Calculate the validators' share of the fee (35% of the total fee)
+        if (validators.length > 0) { // Check if there are any validators
+            uint256 validatorShare = validatorsFee / validators.length; // Divide the validators' fee equally among the validators
+            for (uint256 i = 0; i < validators.length; i++) {
+                validators[i].rewards += validatorShare; // Add each validator's share of the fee to their rewards balance
+            }
+        }
+
+        emit Transfer(from, to, amountAfterFee); // Emit a transfer event for the transaction amount after the fee is deducted
+        emit Transfer(from, owner, ownerFee); // Emit a transfer event for the owner's fee
+
+        return true; // Return true indicating that the transaction was successful
+    }
+
+
+    // Allows the current owner to transfer ownership to a new address. Only the current owner can execute this function
+    function transferOwnership(address newOwner) external onlyOwner nonReentrant { // Protected from reentrancy attacks
+
+        require(newOwner != address(0), "New owner cannot be zero address"); // Ensures the new owner's address is not the zero address (invalid address). If the new owner is address(0), it will revert with the message "New owner cannot be zero address"
+        emit OwnershipTransferred(owner, newOwner); // Emits an event to notify that the ownership has been transferred from the current owner to the new owner
+        owner = newOwner; // Updates the owner variable to the new owner's address, effectively transferring ownership
+    }
+
+
+    function stake(uint256 amountInBaseUnits) external nonReentrant {
+        require(amountInBaseUnits > 0, "Amount must be greater than zero");
+        require(balanceOf[msg.sender] >= amountInBaseUnits, "Insufficient balance");
+
+        StakerInfo storage info = stakerInfo[msg.sender];
+
+        uint256 fee = (amountInBaseUnits * transactionFeeRate) / 10000;
+        uint256 amountAfterFee = amountInBaseUnits - fee;
+
+        uint256 ownerFee = fee / 2;
+        uint256 rewardPoolFee = fee - ownerFee;
+
+        balanceOf[owner] += ownerFee;
+        rewardPool += rewardPoolFee;
+
+        info.stakedAmount += amountAfterFee;
+        info.lastClaimedTime = block.timestamp;
+
+        balanceOf[msg.sender] -= amountInBaseUnits;
+        emit Staked(msg.sender, amountAfterFee);
+    }
+
+    function claimRewardStake() public nonReentrant {
+        StakerInfo storage info = stakerInfo[msg.sender];
+        uint256 rewards = getPendingRewards(msg.sender);
+        require(rewards > 0, "Not enough rewards");
+        require(rewardPool >= rewards, "Insufficient reward pool");
+
+        uint256 fee = (rewards * transactionFeeRate) / 10000;
+        uint256 rewardsAfterFee = rewards - fee;
+
+        uint256 poolFee = (fee * 70) / 100;
+        uint256 ownerFee = fee - poolFee;
+
+        balanceOf[owner] += ownerFee;
+        rewardPool += poolFee;
+
+        rewardPool -= rewards;
+        balanceOf[msg.sender] += rewardsAfterFee;
+
+        info.totalClaimedRewards += rewardsAfterFee;
+        info.lastClaimedTime = block.timestamp;
+
+        emit RewardsClaimed(msg.sender, rewardsAfterFee);
+    }
+
+    function unstake() external nonReentrant {
+        StakerInfo storage info = stakerInfo[msg.sender];
+        require(info.stakedAmount > 0, "No staked tokens to unstake");
+
+        uint256 rewards = getPendingRewards(msg.sender);
+        if (rewards > 0) {
+            require(rewardPool >= rewards, "Insufficient reward pool");
+
+            uint256 fee = (rewards * transactionFeeRate) / 10000;
+            uint256 rewardsAfterFee = rewards - fee;
+
+            uint256 poolFee = (fee * 70) / 100;
+            uint256 ownerFee = fee - poolFee;
+
+            balanceOf[owner] += ownerFee;
+            rewardPool += poolFee;
+
+            rewardPool -= rewards;
+            balanceOf[msg.sender] += rewardsAfterFee;
+            info.totalClaimedRewards += rewardsAfterFee;
+            emit RewardsClaimed(msg.sender, rewardsAfterFee);
+        }
+
+        uint256 amountToUnstake = info.stakedAmount;
+        balanceOf[msg.sender] += amountToUnstake;
+
+        info.stakedAmount = 0;
+        info.lastClaimedTime = 0;
+
+        emit Unstaked(msg.sender, amountToUnstake);
+    }
+
+    function getPendingRewards(address staker) public view returns (uint256) {
+        StakerInfo storage info = stakerInfo[staker];
+        if (info.stakedAmount == 0) return 0;
+
+        uint256 timeElapsed = block.timestamp - info.lastClaimedTime;
+        uint256 pendingRewards = (info.stakedAmount * DAILY_REWARD_RATE * timeElapsed) / (10000 * 1 days);
+
+        return pendingRewards;
+    }
+
+    // Function to update the daily reward rate
+    function updateDailyRewardRate(uint256 newRate) external onlyOwner {
+        require(newRate > 0 && newRate <= 100, "Reward rate must be between 0 and 1%"); // Ensure the rate is between 0 and 1%
+    
+        uint256 oldRate = DAILY_REWARD_RATE; // Store the old reward rate
+        DAILY_REWARD_RATE = newRate; // Update the reward rate to the new value
+
+        emit DailyRewardRateUpdated(oldRate, newRate); // Emit an event to notify that the daily reward rate has been updated
+    }
+
+
+    // Function to add a validator
+    function addValidator() external nonReentrant { // Ensures that the function cannot be called recursively (prevents reentrancy attacks)
+
+        // Check if the user is already a validator
+        for (uint256 i = 0; i < validators.length; i++) { 
+            require(validators[i].validatorAddress != msg.sender, "Already a validator"); // Reverts if the user is already in the list of validators
+        }
+    
+        require(balanceOf[msg.sender] >= 10000 * (10 ** uint256(decimals)), "Must stake 10,000 tokens to become a validator"); // Ensures that the user has at least 10,000 tokens to become a validator
+    
+        // Decrease the validator's balance
+        balanceOf[msg.sender] -= 10000 * (10 ** uint256(decimals)); // Deducts 10,000 tokens (adjusted for decimals) from the validator's balance
+
+        // Add the validator to the list
+        validators.push(Validator({
+            validatorAddress: msg.sender, // Sets the address of the new validator
+            stake: 10000 * (10 ** uint256(decimals)), // Sets the staked amount of tokens (10,000 tokens adjusted for decimals)
+            rewards: 0 // Initializes the rewards for the new validator to 0
+        }));
+
+        emit ValidatorAdded(msg.sender, 10000 * (10 ** uint256(decimals))); // Emits an event indicating a new validator has been added
+    }
+
+    // Function to remove a validator
+    function removeValidator() external nonReentrant { // Ensures that the function cannot be called recursively (prevents reentrancy attacks)
+
+        for (uint256 i = 0; i < validators.length; i++) { 
+
+            // Refresh the price according to the Oracle or contract state
+            uint256 currentPrice = _getCurrentTokenPrice(); // Retrieves the current token price
+            emit TokenPriceUpdated(currentPrice); // Emits an event to notify about the updated token price
+
+            if (validators[i].validatorAddress == msg.sender) {
+
+                uint256 rewardsToDistribute = validators[i].rewards; // Retrieves the accumulated rewards of the validator
+
+                balanceOf[msg.sender] += validators[i].stake;// Refunds the validator's stake
+
+                // Reward distribution
+                uint256 rewardPoolShare = rewardsToDistribute * 20 / 100; // 20% for the rewardPool
+                uint256 ownerShare = rewardsToDistribute * 5 / 100; // 5% for the contract owner
+                uint256 validatorsShare = rewardsToDistribute * 75 / 100; // 75% for other validators
+        
+                // Adding rewards to the respective accounts
+                rewardPool += rewardPoolShare; // Add the reward pool share to the rewardPool
+                balanceOf[owner] += ownerShare; // Add the owner's share to the contract owner's balance
+        
+                // Distributing 35% among other validators
+                uint256 remainingValidators = validators.length - 1; // The number of remaining validators (excluding the one that is being removed)
+                if (remainingValidators > 0) {
+                    uint256 sharePerValidator = validatorsShare / remainingValidators; // Calculate the share per remaining validator
+                    for (uint256 j = 0; j < validators.length; j++) {
+                        if (validators[j].validatorAddress != msg.sender) { // If the validator is not the one being removed
+                            validators[j].rewards += sharePerValidator; // Accumulate the reward for the other validators
+                        }
+                    }
+                }
+
+                // Removing the validator
+                validators[i] = validators[validators.length - 1]; // Replace the validator being removed with the last validator in the list
+                validators.pop(); // Remove the last validator from the array
+
+                emit ValidatorRemoved(msg.sender); // Emit an event to notify that the validator has been removed
+                return; // Exit the function after the validator has been removed
+            }
+        }
+        revert("Not a validator");
+    }
+
+    // Function for withdrawing rewards
+    function withdrawRewards() external nonReentrant {
+
+        uint256 totalRewards = 0; // Initialize the variable to store the total rewards to be withdrawn
+
+        // Refresh the price based on the Oracle or contract state
+        uint256 currentPrice = _getCurrentTokenPrice(); // Fetch the current token price
+        emit TokenPriceUpdated(currentPrice); // Emit the event to notify listeners about the new token price
+
+        for (uint256 i = 0; i < validators.length; i++) { // Iterate through the list of validators
+            if (validators[i].validatorAddress == msg.sender) { // Check if the current validator address matches the sender's address
+                totalRewards = validators[i].rewards; // Get the total rewards of the sender
+                validators[i].rewards = 0; // Reset the rewards for this validator to 0
+                break; // Exit the loop once the validator's rewards are found
+            }
+        }
+
+        require(totalRewards > 0, "No rewards to withdraw"); // Ensure that the validator has rewards to withdraw (greater than 0)
+        balanceOf[msg.sender] += totalRewards; // Transfer the rewards to the validator's balance
+
+        emit RewardsWithdrawn(msg.sender, totalRewards); // Emit the event indicating that the rewards have been withdrawn
+    }
+
+    // Function to get information about all validators
+    function getValidators() external view returns (address[] memory, uint256[] memory, uint256[] memory) {
+
+        address[] memory addresses = new address[](validators.length); // Creates an array to store the addresses of all validators
+        uint256[] memory stakes = new uint256[](validators.length); // Creates an array to store the staked amounts for each validator
+        uint256[] memory rewards = new uint256[](validators.length); // Creates an array to store the rewards of each validator
+
+        for (uint256 i = 0; i < validators.length; i++) { // Loop through all the validators
+            addresses[i] = validators[i].validatorAddress; // Assign each validator's address to the addresses array
+            stakes[i] = validators[i].stake; // Assign each validator's staked amount to the stakes array
+            rewards[i] = validators[i].rewards; // Assign each validator's rewards to the rewards array
+        }
+
+        return (addresses, stakes, rewards); // Return the arrays containing the addresses, stakes, and rewards of all validators
+    }
+
+
+    // Function to create a loan
+    function createLoan(uint256 collateralWei, uint256 duration) external payable nonReentrant hasNoActiveLoan {
+
+        require(collateralWei > 0, "Collateral must be greater than zero");
+        require(duration > 0, "Loan duration must be greater than zero");
+        require(duration <= maxLoanDuration, "Loan duration cannot exceed 365 days");
+
+        uint256 currentPrice = _getCurrentTokenPrice(); // Current token price when the loan is created
+        emit TokenPriceUpdated(currentPrice);
+
+        uint256 maxLoanAmountInBaseUnits = collateralWei * (10 ** decimals) / currentPrice;
+
+        require(reserveTokens >= maxLoanAmountInBaseUnits, "Not enough tokens in reserve");
+
+        // Adjust token price as if tokens were purchased (increase price due to loan)
+        _updateTokenPriceForLoan(maxLoanAmountInBaseUnits, true); // Update price as if the tokens are being bought
+
+        // Deduct tokens from reserveTokens
+        reserveTokens -= maxLoanAmountInBaseUnits;
+
+        // Add loaned tokens to the borrower's balance
+        balanceOf[msg.sender] += maxLoanAmountInBaseUnits;
+
+        totalSoldTokens += maxLoanAmountInBaseUnits;
+
+        // Store loan details in the mapping
+        loans[msg.sender] = Loan({
+            collateralWei: collateralWei,
+            loanAmount: maxLoanAmountInBaseUnits,
+            startTime: block.timestamp,
+            duration: duration,
+            isActive: true
+        });
+
+        emit LoanCreated(msg.sender, collateralWei, maxLoanAmountInBaseUnits); // Emit loan amount directly in Wei
+        emit Transfer(address(0), msg.sender, maxLoanAmountInBaseUnits);
+    }
+
+    // Function to repay loan
+    function repayLoan() external nonReentrant {
+
+        Loan storage loan = loans[msg.sender];
+        require(loan.isActive, "No active loan to repay");
+
+        uint256 loanDuration = block.timestamp - loan.startTime;
+        require(loanDuration <= loan.duration, "Loan duration has expired, repay not allowed");
+
+        uint256 currentPrice = _getCurrentTokenPrice(); // Current token price when the loan is repaid
+        emit TokenPriceUpdated(currentPrice);
+
+        uint256 interestInBaseUnits = (loan.loanAmount * dailyInterestRate * loanDuration) / (10000 * 1 days);
+        uint256 totalRepaymentInBaseUnits = loan.loanAmount + interestInBaseUnits;
+
+        require(balanceOf[msg.sender] >= loan.loanAmount, "Insufficient tokens to repay the loan");
+
+        // Deduct the loan amount from the user's balance
+        balanceOf[msg.sender] -= loan.loanAmount;
+
+        // Return the repaid loan amount to the reserveTokens pool
+        reserveTokens += loan.loanAmount;
+
+        totalSoldTokens -= loan.loanAmount;
+
+        // Adjust token price as if tokens were sold (decrease price due to repayment)
+        _updateTokenPriceForLoan(loan.loanAmount, false); // Update price as if the tokens are being sold
+
+        // Deduct interest from the collateral (in Wei)
+        loan.collateralWei -= interestInBaseUnits; // No need for decimals adjustment as everything is in Wei
+
+        // Mark the loan as inactive and remove the record
+        loan.isActive = false;
+        delete loans[msg.sender];
+
+        // Splitting the interest
+        uint256 ownerShareInBaseUnits = interestInBaseUnits / 2;
+        uint256 reserveShareInBaseUnits = interestInBaseUnits - ownerShareInBaseUnits;
+        reserveETH += reserveShareInBaseUnits; // Reserve receives interest share in Wei
+        balanceOf[owner] += ownerShareInBaseUnits; // Owner receives interest share in Wei
+
+        // Returning the remaining collateral to the user
+        uint256 collateralReturn = loan.collateralWei;
+        payable(msg.sender).transfer(collateralReturn); // Collateral is in Wei
+
+        emit LoanRepaid(msg.sender, collateralReturn, totalRepaymentInBaseUnits);
+        emit Transfer(msg.sender, address(0), loan.loanAmount);
+
+    }
+
+    // Internal function to update the token price based on the transaction type (loan creation or repayment)
+    function _updateTokenPriceForLoan(uint256 tokenAmount, bool isLoanCreation) internal {
+        uint256 adjustment = (tokenAmount / (10 ** uint256(decimals))) * 0.000000013 ether; // Price adjustment factor
+        if (isLoanCreation) {
+            tokenPriceBase += adjustment; // Increase the token price when creating a loan (tokens are borrowed)
+        } else {
+            if (tokenPriceBase > adjustment) {
+                tokenPriceBase -= adjustment; // Decrease the token price when repaying the loan (tokens are returned)
+            } else {
+                tokenPriceBase = 0; // Avoid negative price, set it to 0 if the adjustment is greater than the base price
+            }
+        }
+        emit TokenPriceUpdated(tokenPriceBase); // Emit the updated token price
+    }
+
+    // Function to liquidate the collateral of a borrower, only callable by the owner
+    function liquidateCollateral(address borrower) external payable nonReentrant onlyOwner {
+
+        Loan storage loan = loans[borrower];
+        require(loan.isActive, "No active loan to liquidate");
+
+        uint256 loanDuration = block.timestamp - loan.startTime;
+        require(loanDuration > loan.duration, "Loan duration has not expired");
+
+        // Refresh the price based on the Oracle or contract state
+        uint256 currentPrice = _getCurrentTokenPrice();
+        emit TokenPriceUpdated(currentPrice);
+
+        uint256 collateralWeiToDistribute = loan.collateralWei;
+
+        // Collateral distribution (all amounts are in Wei)
+        reserveETH += (collateralWeiToDistribute * 90) / 100;
+        balanceOf[owner] += (collateralWeiToDistribute * 10) / 100;
+
+        // Mark the loan as inactive and remove the record
+        loan.isActive = false;
+        delete loans[borrower];
+
+        emit CollateralLiquidated(borrower, collateralWeiToDistribute);
+    }
+
+    // Function to update the daily interest rate
+    function updateDailyInterestRate(uint256 newRate) external onlyOwner { // Only the owner can call this function to update the interest rate
+        require(newRate > 0 && newRate <= 100, "Reward rate must be between 0 and 1%"); // Ensure the rate is between 0 and 1%
+
+        dailyInterestRate = newRate; // Update the daily interest rate to the new rate
+        emit DailyInterestRateUpdated(newRate); // Emit event for the update
+    }
+
+
+    // Function to create a loan (lender)
+    function createUserLoan(uint256 _loanAmount, uint256 _interestRate, uint256 _loanDuration) external nonReentrant { 
+
+        require(userLoans[msg.sender].isActive == false, "Existing loan must be repaid first"); 
+
+        // Refresh the token price based on Oracle data or contract logic
+        uint256 currentPrice = _getCurrentTokenPrice(); 
+        emit TokenPriceUpdated(currentPrice); 
+
+        uint256 loanAmountInBaseUnits = _loanAmount; // No conversion to decimals needed, assume already in base units (Wei)
+        balanceOf[msg.sender] -= loanAmountInBaseUnits; // Deduct the loan amount from the lender's balance
+        balanceOf[address(this)] += loanAmountInBaseUnits; // Add the loan amount to the smart contract's balance (as the contract holds the loan)
+
+        // Create a record of the loan for the lender
+        userLoans[msg.sender] = UserLoan({
+            lender: msg.sender,
+            borrower: address(0),
+            collateralTokens: 0,
+            loanAmount: loanAmountInBaseUnits, // Loan amount in base units (Wei)
+            interestRate: _interestRate,
+            startTime: block.timestamp,
+            loanDuration: _loanDuration,
+            isActive: false 
+        });
+
+        emit UserLoanCreated(msg.sender, address(0), loanAmountInBaseUnits, _interestRate, _loanDuration);
+    }
+    
+    // Function to activate the loan by the borrower with collateral
+    function activateUserLoan(address lenderAddress, uint256 collateralAmount) external nonReentrant {
+
+        UserLoan storage loan = userLoans[lenderAddress]; // Fetch the loan details for the specified lender
+        require(loan.lender != address(0), "No active loan found for this lender"); 
+        require(!loan.isActive, "Loan is already active");
+
+        uint256 collateralAmountInBaseUnits = collateralAmount; // No conversion to decimals needed, assume already in base units (Wei)
+
+        // Refresh the token price
+        uint256 currentPrice = _getCurrentTokenPrice(); 
+        emit TokenPriceUpdated(currentPrice); 
+
+        // Calculate the required collateral (130% of the loan amount)
+        uint256 requiredCollateral = (loan.loanAmount * 130) / 100; 
+        require(collateralAmountInBaseUnits >= requiredCollateral, "Insufficient collateral amount");
+
+        // Transfer collateral from the borrower to the contract
+        require(balanceOf[msg.sender] >= collateralAmountInBaseUnits, "Insufficient token balance for collateral");
+        balanceOf[msg.sender] -= collateralAmountInBaseUnits; // Deduct the collateral amount from the borrower's balance
+        balanceOf[address(this)] += collateralAmountInBaseUnits; // Add the collateral to the contract's balance
+
+        // Activate the loan and set the collateral and borrower
+        loan.collateralTokens = collateralAmountInBaseUnits; // Set the collateral amount for the loan
+        loan.borrower = msg.sender; // Set the borrower address as the sender
+        loan.isActive = true; // Mark the loan as active
+
+        // Transfer the loan amount to the borrower's account
+        balanceOf[address(this)] -= loan.loanAmount; // Deduct the loan amount from the contract's balance
+        balanceOf[msg.sender] += loan.loanAmount; // Add the loan amount to the borrower's balance
+
+        // Assign the borrower's address and activate their record
+        userLoans[msg.sender] = loan; 
+        borrowerToLender[msg.sender] = lenderAddress; 
+
+        emit UserLoanActivated(msg.sender, collateralAmount, loan.loanAmount);
+    }
+
+    // Function to get the loan details of a borrower
+    function getLoanByBorrower(address _borrower) external view returns (UserLoan memory) {
+
+        address lender = borrowerToLender[_borrower]; 
+        require(lender != address(0), "No loan found for this borrower"); 
+        return userLoans[lender]; 
+    }
+  
+    // Function for the borrower to repay the loan to the lender
+    function repayUserLoan() external nonReentrant {
+
+        address lenderAddress = borrowerToLender[msg.sender]; // Retrieve the lender's address linked to the borrower
+        require(lenderAddress != address(0), "No active loan for this borrower"); // Ensure the borrower has an active loan
+
+        UserLoan storage loan = userLoans[lenderAddress]; // Fetch the loan details from the mapping
+        require(loan.isActive, "No active loan to repay"); // Ensure the loan is still active before repayment
+
+        // Check if the loan term has expired
+        uint256 loanEndTime = loan.startTime + loan.loanDuration; // Calculate the loan's expiration time
+        require(block.timestamp <= loanEndTime, "Loan term has expired, repayment is no longer allowed"); // Ensure the loan is still within its valid repayment period
+
+        // Calculate interest (in basic units, no decimals conversion)
+        uint256 loanDurationInSeconds = block.timestamp - loan.startTime; // Determine the total loan duration in seconds
+        uint256 totalInterest = (loan.loanAmount * loan.interestRate * loanDurationInSeconds) / (365 days * 100); // Compute interest based on loan amount, interest rate, and duration
+
+        // Ensure sufficient collateral to cover the interest
+        require(loan.collateralTokens >= totalInterest, "Insufficient collateral to cover interest"); // Checks if the borrower has enough collateral tokens to pay the accumulated interest
+
+        // Deduct interest from the borrower's collateral and credit it to the lender
+        loan.collateralTokens -= totalInterest; // Reduce the collateral tokens by the interest amount
+        balanceOf[lenderAddress] += totalInterest; // Add the deducted interest to the lender's balance
+
+        // Transfer the borrowed amount back to the lender
+        balanceOf[msg.sender] -= loan.loanAmount; // Deduct the loan amount from the borrower's balance
+        balanceOf[lenderAddress] += loan.loanAmount; // Add the loan amount back to the lender's balance
+
+        // Return the remaining collateral to the borrower
+        uint256 remainingCollateral = loan.collateralTokens; // Get the remaining collateral amount
+        if (remainingCollateral > 0) {
+            balanceOf[address(this)] -= remainingCollateral; // Deduct the collateral from the contract balance
+            balanceOf[msg.sender] += remainingCollateral; // Add the collateral back to the borrower's balance
+        }
+
+        // Closing the loan
+        loan.isActive = false; // Mark the loan as inactive
+        delete borrowerToLender[msg.sender]; // Remove the mapping of borrower to lender
+        delete userLoans[lenderAddress]; // Remove the mapping of borrower to lender
+        delete userLoans[msg.sender]; // Delete the borrower's loan record
+
+        emit UserLoanRepaid(msg.sender, lenderAddress, loan.loanAmount + totalInterest, remainingCollateral); // Emit an event indicating the loan has been repaid
+    }
+    
+    // Liquidation of the loan by the lender for the borrower
+    function liquidateUserLoanByLender(address borrower) external nonReentrant {
+
+        UserLoan storage loan = userLoans[borrower]; // Access the loan details of the borrower from the mapping `userLoans` using the borrower's address
+        require(loan.isActive, "No active loan to liquidate"); // Ensure that the loan is active. If it's not, the liquidation cannot proceed
+        require(loan.lender == msg.sender, "Only lender can liquidate this loan"); // Check if the caller is the lender of this loan. Only the lender has the authority to liquidate the loan
+
+        // Checking if the loan term has expired
+        uint256 loanEndTime = loan.startTime + loan.loanDuration; // Calculate the loan end time by adding the loan duration to the loan start time
+        require(block.timestamp > loanEndTime, "Loan term has not yet expired"); // Check if the current time has passed the loan end time. If not, revert with error message
+
+        uint256 collateral = loan.collateralTokens; // Get the total collateral tokens from the loan details and store it in the collateral variable
+
+        // Calculating shares
+        uint256 lenderShare = (collateral * 98) / 100; // 98% of the collateral goes to the lender
+        uint256 ownerShare = (collateral * 1) / 100;  // 1% goes to the contract owner
+        uint256 rewardPoolShare = (collateral * 1) / 100; // 1% goes to the reward pool
+
+        balanceOf[address(this)] -= collateral; // Subtracts the total collateral from the contract
+        balanceOf[loan.lender] += lenderShare; // Transfers 98% to the lender
+        balanceOf[owner] += ownerShare; // Transfers 1% to the contract owner
+        rewardPool += rewardPoolShare; // Transfers 1% to the reward pool
+
+        loan.isActive = false; // Marks the loan as inactive (closed)
+        delete borrowerToLender[borrower]; // Removes the borrower-lender mapping
+        delete userLoans[loan.lender]; // Removes the lender’s loan record
+        delete userLoans[borrower]; // Removes the borrower’s loan record
+
+        emit UserLoanLiquidated(borrower, loan.lender, collateral, lenderShare, ownerShare, rewardPoolShare, block.timestamp); // Emits an event that logs the details of the loan liquidation, including borrower, lender, collateral, and the distribution shares
+    }
+
+    // Function to allow the lender to cancel an inactive loan, ensuring no reentrancy issues
+    function cancelUserLoan() external nonReentrant {
+
+        UserLoan storage loan = userLoans[msg.sender]; // Retrieves the loan data for the sender (the lender) from the userLoans mapping
+        require(!loan.isActive, "Cannot cancel an active loan"); // Ensures the loan is not active before it can be canceled
+        require(loan.lender == msg.sender, "Only lender can cancel their loan"); // Checks that the caller is the lender of the loan
+
+        balanceOf[address(this)] -= loan.loanAmount; // Decreases the smart contract's balance by the loan amount, returning it to the lender
+        balanceOf[msg.sender] += loan.loanAmount; // Increases the lender's balance by the loan amount, effectively returning the loan to the lender
+
+        delete userLoans[msg.sender]; // Removes the lender's loan record from the contract's data structure
+
+        emit UserLoanCancelled(msg.sender); // Emits an event notifying that the loan has been cancelled by the lender
+    }
+
+
+    // Defines a function that transfers tokens from the reward pool to the reserve with a 1% fee, restricted to the contract owner
+    function transferRewardPoolToReserve(uint256 amount) external onlyOwner {
+
+        require(amount <= rewardPool, "Insufficient tokens in reward pool"); // Ensure the reward pool has enough tokens for the transfer, otherwise revert
+
+        uint256 fee = (amount * 1) / 100; // Calculate the fee as 1% of the amount being transferred
+
+        uint256 amountAfterFee = amount - fee; // Calculate the amount after deducting the 1% fee from the original amount
+
+        // Updating balances
+        rewardPool -= amount; // Decrease the reward pool by the total amount transferred (including the fee)
+        reserveTokens += amountAfterFee; // Increase the reserve tokens by the amount after the fee is deducted
+        balanceOf[owner] += fee; // Increase the owner's balance by the fee amount
+
+        emit Transfer(address(this), owner, fee); // Emit an event to log the fee transfer from the contract to the owner
+    }
+
+    // Function to transfer tokens from reserve to reward pool, only callable by the contract owner
+    function transferReserveToRewardPool(uint256 amount) external onlyOwner {
+
+        require(amount <= reserveTokens, "Insufficient tokens in reserve"); // Ensure there are enough tokens in the reserve to complete the transfer
+
+        uint256 fee = (amount * 1) / 100; // Calculates the fee (1% of the amount) in base units (e.g., smallest token unit)
+
+        uint256 amountAfterFee = amount - fee; // Subtracts the fee from the original amount to get the amount after fee
+
+        reserveTokens -= amount; // Decreases the reserveTokens by the total amount sent, including the fee
+        rewardPool += amountAfterFee; // Increases the rewardPool by the amount after the fee has been deducted
+        balanceOf[owner] += fee; // Increases the owner’s balance by the fee amount (1% of the total amount)
+
+        emit Transfer(address(this), owner, fee); // Emit an event to log the fee transfer from contract to owner
+    }
+
+ 
+    // Function to receive ETH without data
+    receive() external payable {
+        reserveETH += msg.value;
+    }
+
+    // Fallback function to receive ETH or handle unknown calls
+    fallback() external payable {
+        reserveETH += msg.value;
+    }
+}
