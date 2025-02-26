@@ -192,7 +192,7 @@ contract Crown is ReentrancyGuard {
         // 3 billion tokens
         rewardPool = rewardPoolInitialAllocation; // Set the initial rewardPool value to the specified rewardPoolInitialAllocation amount
         
-        // 0.00001 eth za 1 token (10000000000000000 wei)
+        // 0.00001 ETH per 1 token (10000000000000000 wei)
         tokenPriceBase = 0.00001 ether; // Set the base price of the token to ether
 
         // 6 billion tokens
