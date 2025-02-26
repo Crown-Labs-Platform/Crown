@@ -21,7 +21,7 @@ contract Crown is ReentrancyGuard {
 
     bool public useOraclePrice = false; // Switch to use oracle prices
     uint256 public oraclePrice; // Price oracle
-    AggregatorV3Interface internal priceFeed;  // Declares a state variable 'priceFeed' of type AggregatorV3Interface to interact with a price feed contract
+    AggregatorV3Interface internal priceFeed; // Declares a state variable 'priceFeed' of type AggregatorV3Interface to interact with a price feed contract
     
     uint256 public constant reserveAllocation = 12000000000 * (10 ** decimals); // 12 billion tokens to reserves resere tokens
     uint256 public constant ownerAllocation = 6000000000 * (10 ** decimals); // 6 billion tokens to the owner
@@ -47,7 +47,7 @@ contract Crown is ReentrancyGuard {
     struct StakerInfo {
         uint256 stakedAmount; // Total stake amount
         uint256 lastClaimedTime; // Last claimed time reward
-        uint256 totalClaimedRewards;
+        uint256 totalClaimedRewards; // Stores the total amount of rewards that have been claimed
     }
 
 
@@ -88,35 +88,94 @@ contract Crown is ReentrancyGuard {
     Validator[] public validators; // List of registered validators
 
 
+    // Emits an event when the transaction fee rate is updated, showing the old and new rates
     event TransactionFeeRateUpdated(uint256 oldRate, uint256 newRate);
+
+    // Emits an event when the usage of the oracle price is updated, indicating the owner and new status
     event UseOraclePriceUpdated(address indexed owner, bool newStatus);
+
+    // Emits an event when a user buys tokens, logging buyer's address, ETH spent, tokens received, and fee breakdown
     event TokensBought(address indexed buyer, uint256 ethAmount, uint256 tokensBought, uint256 feeInBaseUnits, uint256 ownerFee, uint256 rewardPoolFee, uint256 validatorsFee);
+
+    // Emits an event when a user sells tokens, logging seller's address, tokens sold, ETH received, and fee breakdown
     event TokensSold(address indexed seller, uint256 tokenAmount, uint256 ethAmount, uint256 tokensAfterFee, uint256 ownerFee, uint256 rewardPoolFee, uint256 validatorsFee);
+
+    // Emits an event when tokens are transferred from one address to another
     event Transfer(address indexed from, address indexed to, uint256 amount);
+
+    // Emits an event when the owner's fee is transferred, logging the sender, the owner, and the fee amount
     event OwnerFeeTransferred(address indexed from, address indexed owner, uint256 feeAmount);
+
+    // Emits an event when the reward pool fee is transferred, logging the sender and the fee amount
     event RewardPoolFeeTransferred(address indexed from, uint256 feeAmount);
+
+    // Emits an event when validator fees are distributed, logging the total fee and the share for each validator
     event ValidatorFeesDistributed(uint256 totalValidatorFee, uint256 individualValidatorShare);
+
+    // Emits an event when the token price is updated, logging the new price
     event TokenPriceUpdated(uint256 newPrice);
+
+    // Emits an event when an approval is made, logging the owner, the spender, and the approved amount
     event Approval(address indexed owner, address indexed spender, uint256 amount);
+
+    // Emits an event when fees are distributed, logging the sender and the breakdown of fees for the owner, reward pool, and validators
     event FeeDistributed(address indexed from, uint256 ownerFee, uint256 rewardPoolFee, uint256 validatorsFee);
+
+    // Emits an event when the ownership of the contract is transferred, logging the previous owner and the new owner
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    // Emits an event when a user stakes tokens, logging the staker's address and the amount of tokens staked
     event Staked(address indexed staker, uint256 amountStaked);
+
+    // Emits an event when a staker claims their rewards, logging the staker's address and the amount of rewards claimed
     event RewardsClaimed(address indexed staker, uint256 rewardsClaimed);
+
+    // Emits an event when a user unstakes tokens, logging the staker's address and the amount of tokens unstaked
     event Unstaked(address indexed staker, uint256 amountUnstaked);
+
+    // Emits an event when the daily reward rate is updated, logging the old and new reward rates
     event DailyRewardRateUpdated(uint256 oldRate, uint256 newRate);
+
+    // Emits an event when a new validator is added, logging the validator's address and the amount of tokens staked
     event ValidatorAdded(address indexed validatorAddress, uint256 stakedAmount);
+
+    // Emits an event when a validator is removed, logging the validator's address
     event ValidatorRemoved(address indexed validatorAddress);
+
+    // Emits an event when a validator withdraws their rewards, logging the validator's address and the amount withdrawn
     event RewardsWithdrawn(address indexed validator, uint256 amount);
+
+    // Emits an event when a loan is created, logging the borrower's address, the collateral amount, and the loan amount
     event LoanCreated(address indexed borrower, uint256 collateralWei, uint256 loanAmountInBaseUnits);
+
+    // Emits an event when a loan is repaid, logging the borrower's address, the collateral returned, and the total repayment amount
     event LoanRepaid(address indexed borrower, uint256 collateralReturned, uint256 totalRepaymentInBaseUnits);
+
+    // Emits an event when a borrower's collateral is liquidated, logging the borrower's address and the amount of collateral liquidated
     event CollateralLiquidated(address indexed borrower, uint256 collateralWei);
+
+    // Emits an event when the daily interest rate is updated, logging the new interest rate
     event DailyInterestRateUpdated(uint256 newRate);
+
+    // Emits an event when a user loan is created, logging the lender's address, borrower's address, loan amount, interest rate, and loan duration
     event UserLoanCreated(address indexed lender, address indexed borrower, uint256 loanAmount, uint256 interestRate, uint256 loanDuration);
+
+    // Emits an event when a user loan is activated, logging the borrower's address, collateral amount, and loan amount
     event UserLoanActivated(address indexed borrower, uint256 collateralAmount, uint256 loanAmount);
+
+    // Emits an event when a user loan is repaid, logging the borrower's address, lender's address, total repayment amount, and remaining collateral
     event UserLoanRepaid(address indexed borrower, address indexed lender, uint256 totalRepaymentAmount, uint256 remainingCollateral);
+
+    // Emits an event when a user loan is liquidated, logging the borrower's and lender's addresses, total collateral, fee distribution, and liquidation timestamp
     event UserLoanLiquidated(address indexed borrower, address indexed lender, uint256 totalCollateral, uint256 lenderShare, uint256 ownerShare, uint256 rewardPoolShare, uint256 liquidationTimestamp);
+
+    // Emits an event when a user loan is cancelled, logging the lender's address
     event UserLoanCancelled(address indexed lender);
+
+    // Emits an event when the reward pool is transferred to the reserve, logging the total amount transferred, the fee amount, and the amount after the fee
     event RewardPoolTransferredToReserve(uint256 amountTransferred, uint256 feeAmount, uint256 amountAfterFee);
+
+    // Emits an event when the reserve is transferred to the reward pool, logging the total amount transferred, the fee amount, and the amount after the fee
     event ReserveTransferredToRewardPool(uint256 amountTransferred, uint256 feeAmount, uint256 amountAfterFee);
 
 
