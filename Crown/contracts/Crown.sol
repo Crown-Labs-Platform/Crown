@@ -5,52 +5,36 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 contract Crown is ReentrancyGuard {
-
     string public name = "Crown"; 
     string public symbol = "CRW"; 
     uint8 public constant decimals = 18;
     uint256 public totalSupply = 21000000000 * (10 ** uint256(decimals)); 
 
     address public owner; 
-    
     uint256 public reserveTokens; 
     uint256 public reserveETH; 
     uint256 public collateralReserveETH;
     uint256 public tokenPriceBase;
-
     uint256 public totalSoldTokens; 
-
     bool public useOraclePrice = false; 
     uint256 public oraclePrice; 
     AggregatorV3Interface internal priceFeed; 
-    
+
     uint256 public constant reserveAllocation = 12000000000 * (10 ** decimals); 
     uint256 public constant ownerAllocation = 6000000000 * (10 ** decimals); 
     uint256 public constant rewardPoolInitialAllocation = 3000000000 * (10 ** decimals); 
-
-
     uint256 public rewardPool; 
-    
-    // Stake Rate % -- 1 = 0.01% / 100 = 1%
-    uint256 public DAILY_REWARD_RATE = 2; // 0.02 % as 2 
 
-    //Transaction Fee % -- 1 = 0.01% / 100 = 10% 
-    uint256 public transactionFeeRate = 10; // 10 = 1%
-
-    //Loans Rate % -- 1 = 0.01% / 100 = 1%
-    uint256 public dailyInterestRate = 2; // Daily interest rate 0.02% 
-
-    // Max Days Loan in seconds
-    uint256 public maxLoanDuration = 365 days; // Max loan duration time max 1 year = 365 days in seconds - 1 Day = 86400 seconds
-
-
+    uint256 public DAILY_REWARD_RATE = 2; // 0.02%
+    uint256 public transactionFeeRate = 10; // 1%
+    uint256 public dailyInterestRate = 2; // 0.02%
+    uint256 public maxLoanDuration = 365 days;
 
     struct StakerInfo {
         uint256 stakedAmount; 
         uint256 lastClaimedTime; 
         uint256 totalClaimedRewards;
     }
-
 
     struct Validator {
         address validatorAddress; 
@@ -77,17 +61,13 @@ contract Crown is ReentrancyGuard {
         bool isActive;
     }
 
-
-
     mapping(address => uint256) public balanceOf; 
     mapping(address => mapping(address => uint256)) public allowance; 
     mapping(address => StakerInfo) public stakerInfo; 
     mapping(address => Loan) public loans; 
     mapping(address => UserLoan) public userLoans; 
     mapping(address => address) public borrowerToLender; 
-
     Validator[] public validators; 
-
 
     event TransactionFeeRateUpdated(uint256 oldRate, uint256 newRate);
     event UseOraclePriceUpdated(address indexed owner, bool newStatus);
@@ -99,7 +79,6 @@ contract Crown is ReentrancyGuard {
     event ValidatorFeesDistributed(uint256 totalValidatorFee, uint256 individualValidatorShare);
     event TokenPriceUpdated(uint256 newPrice);
     event Approval(address indexed owner, address indexed spender, uint256 amount);
-    event FeeDistributed(address indexed from, uint256 ownerFee, uint256 rewardPoolFee, uint256 validatorsFee);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event Staked(address indexed staker, uint256 amountStaked);
     event RewardsClaimed(address indexed staker, uint256 rewardsClaimed);
@@ -118,28 +97,17 @@ contract Crown is ReentrancyGuard {
     event UserLoanRepaid(address indexed borrower, address indexed lender, uint256 totalRepaymentAmount, uint256 remainingCollateral);
     event UserLoanLiquidated(address indexed borrower, address indexed lender, uint256 totalCollateral, uint256 lenderShare, uint256 ownerShare, uint256 rewardPoolShare, uint256 liquidationTimestamp);
     event UserLoanCancelled(address indexed lender);
-    event RewardPoolTransferredToReserve(uint256 amountTransferred, uint256 feeAmount, uint256 amountAfterFee);
-    event ReserveTransferredToRewardPool(uint256 amountTransferred, uint256 feeAmount, uint256 amountAfterFee);
-
-
 
     constructor(address _priceFeed) { 
-
         owner = msg.sender; 
-
         priceFeed = AggregatorV3Interface(_priceFeed); 
-
         reserveTokens = reserveAllocation; 
-        
         rewardPool = rewardPoolInitialAllocation; 
-        
         tokenPriceBase = 0.00001 ether; 
-
         balanceOf[owner] = ownerAllocation; 
-
         emit Transfer(address(0), owner, ownerAllocation); 
     }
-    
+
     modifier onlyOwner() {
         require(msg.sender == owner, "Not the contract owner");
         _;
@@ -162,71 +130,40 @@ contract Crown is ReentrancyGuard {
         _;
     }
 
+    function _getCurrentTokenPrice() internal view returns (uint256) {
+        if (useOraclePrice) {
+            (, int256 price,,,) = priceFeed.latestRoundData();
+            return uint256(price);
+        } else {
+            return tokenPriceBase;
+        }
+    }
+
+    function _updateTokenPrice(uint256 tokenAmount, bool isBuy) internal {
+        uint256 adjustment = (tokenAmount / (10 ** uint256(decimals))) * 0.000000013 ether;
+        if (isBuy) {
+            tokenPriceBase += adjustment;
+        } else if (tokenPriceBase > adjustment) {
+            tokenPriceBase -= adjustment;
+        } else {
+            tokenPriceBase = 0;
+        }
+        emit TokenPriceUpdated(tokenPriceBase);
+    }
 
     function setTransactionFeeRate(uint256 newRate) external onlyOwner {
         require(newRate > 0 && newRate <= 100, "Invalid fee rate"); 
-    
         uint256 oldRate = transactionFeeRate; 
         transactionFeeRate = newRate; 
-
         emit TransactionFeeRateUpdated(oldRate, newRate); 
     }
 
-
-    function setUseOraclePrice(bool _useOraclePrice) external onlyOwner { 
-        useOraclePrice = _useOraclePrice;
-        emit UseOraclePriceUpdated(msg.sender, _useOraclePrice); 
-    }
-
-    function getMarketPrice() public view returns (int) { 
-        (,int price,,,) = priceFeed.latestRoundData();
-        return price; 
-    }
-
-    function _getCurrentTokenPrice() internal view returns (uint256) {
-        if (useOraclePrice) { 
-            int marketPrice = getMarketPrice(); 
-            return marketPrice > 0 ? uint256(marketPrice) : tokenPriceBase; 
-        } else {
-            return tokenPriceBase; 
-        }
-    }
-    
-    function getCurrentTokenPrice() public view returns (uint256) {
-        return _getCurrentTokenPrice(); 
-    }
-
-    function getCollateralReserve() external view returns (uint256) {
-        return collateralReserveETH;
-    }
-
-    function getReserveETH() external view returns (uint256) {
-        return reserveETH;
-    }
-
-
-    function _updateTokenPrice(uint256 tokenAmount, bool isBuy) internal {
-        uint256 adjustment = (tokenAmount / (10 ** uint256(decimals))) * 0.000000013 ether; 
-        if (isBuy) {
-            tokenPriceBase += adjustment; 
-        } else { 
-            if (tokenPriceBase > adjustment) {
-                tokenPriceBase -= adjustment; 
-            } else {
-                tokenPriceBase = 0; 
-            }
-        }
-        emit TokenPriceUpdated(tokenPriceBase); 
-    }
-
-    
     function buyTokensWithETH(uint256 ethAmountInWei) external payable nonReentrant {
         require(ethAmountInWei > 0, "You must specify an amount greater than 0 wei");
         require(msg.value == ethAmountInWei, "Sent ETH must match the specified amount");
 
         uint256 currentTokenPrice = _getCurrentTokenPrice();
         uint256 tokensToBuy = (ethAmountInWei * (10 ** uint256(decimals))) / currentTokenPrice;
-
         require(tokensToBuy <= reserveTokens, "Not enough tokens in reserve");
 
         uint256 feeInBaseUnits = (tokensToBuy * transactionFeeRate) / 10000;
@@ -249,11 +186,9 @@ contract Crown is ReentrancyGuard {
         reserveETH += ethAmountInWei;
         reserveTokens -= tokensToBuy;
         balanceOf[msg.sender] += tokensAfterFee;
-
         totalSoldTokens += tokensAfterFee; 
 
         emit TokensBought(msg.sender, ethAmountInWei, tokensAfterFee, feeInBaseUnits, ownerFee, rewardPoolFee, validatorsFee, address(this).balance);
-
 
         if (!useOraclePrice) {
             _updateTokenPrice(tokensToBuy, true); 
@@ -289,9 +224,8 @@ contract Crown is ReentrancyGuard {
         }
 
         reserveETH -= ethAmount;
-        reserveTokens += tokenAmountInBaseUnits;
+        reserveTokens += tokensAfterFee; // Oprava: pouze tokensAfterFee
         balanceOf[msg.sender] -= tokenAmountInBaseUnits;
-
         totalSoldTokens -= tokensAfterFee;
 
         (bool sent, ) = payable(msg.sender).call{value: ethAmount}("");
@@ -309,27 +243,25 @@ contract Crown is ReentrancyGuard {
         return address(this).balance;
     }
 
-
     function transfer(address to, uint256 amountInBaseUnits) external nonReentrant returns (bool) { 
-        
         require(to != address(0), "Cannot transfer to the zero address"); 
         require(balanceOf[msg.sender] >= amountInBaseUnits, "Insufficient balance"); 
 
         uint256 currentPrice = _getCurrentTokenPrice(); 
         emit TokenPriceUpdated(currentPrice); 
 
-        uint256 amountAfterFee = amountInBaseUnits - (amountInBaseUnits * 1) / 100; 
+        uint256 fee = (amountInBaseUnits * 1) / 100; // 1% poplatek
+        uint256 amountAfterFee = amountInBaseUnits - fee; 
+
+        uint256 ownerFee = (fee * 15) / 100; // Oprava: z fee, ne z celku
+        uint256 rewardPoolFee = (fee * 50) / 100; 
+        uint256 validatorsFee = (fee * 35) / 100; 
 
         balanceOf[msg.sender] -= amountInBaseUnits; 
         balanceOf[to] += amountAfterFee; 
-
-        uint256 ownerFee = (amountInBaseUnits * 15) / 100; 
         balanceOf[owner] += ownerFee; 
-
-        uint256 rewardPoolFee = (amountInBaseUnits * 50) / 100; 
         rewardPool += rewardPoolFee; 
-    
-        uint256 validatorsFee = (amountInBaseUnits * 35) / 100; 
+
         if (validators.length > 0) {
             uint256 validatorShare = validatorsFee / validators.length; 
             for (uint256 i = 0; i < validators.length; i++) {
@@ -341,20 +273,17 @@ contract Crown is ReentrancyGuard {
         emit Transfer(msg.sender, to, amountAfterFee); 
         emit OwnerFeeTransferred(msg.sender, owner, ownerFee); 
         emit RewardPoolFeeTransferred(msg.sender, rewardPoolFee); 
-
         return true; 
     }
 
     function approve(address spender, uint256 amountInBaseUnits) external returns (bool) { 
         require(spender != address(0), "Cannot approve the zero address");
-
         allowance[msg.sender][spender] = amountInBaseUnits; 
         emit Approval(msg.sender, spender, amountInBaseUnits); 
         return true; 
     }
-   
-    function transferFrom(address from, address to, uint256 amountInBaseUnits) external nonReentrant returns (bool) { 
 
+    function transferFrom(address from, address to, uint256 amountInBaseUnits) external nonReentrant returns (bool) { 
         require(from != address(0), "Cannot transfer from the zero address"); 
         require(to != address(0), "Cannot transfer to the zero address");
         require(balanceOf[from] >= amountInBaseUnits, "Insufficient balance");
@@ -368,16 +297,15 @@ contract Crown is ReentrancyGuard {
 
         balanceOf[from] -= amountInBaseUnits; 
         balanceOf[to] += amountAfterFee; 
-
         allowance[from][msg.sender] -= amountInBaseUnits; 
 
         uint256 ownerFee = (feeInBaseUnits * 15) / 100; 
-        balanceOf[owner] += ownerFee; 
-
         uint256 rewardPoolFee = (feeInBaseUnits * 50) / 100; 
+        uint256 validatorsFee = (feeInBaseUnits * 35) / 100; 
+
+        balanceOf[owner] += ownerFee; 
         rewardPool += rewardPoolFee; 
 
-        uint256 validatorsFee = (feeInBaseUnits * 35) / 100; 
         if (validators.length > 0) { 
             uint256 validatorShare = validatorsFee / validators.length; 
             for (uint256 i = 0; i < validators.length; i++) {
@@ -387,25 +315,20 @@ contract Crown is ReentrancyGuard {
 
         emit Transfer(from, to, amountAfterFee); 
         emit Transfer(from, owner, ownerFee); 
-
         return true; 
     }
 
-
     function transferOwnership(address newOwner) external onlyOwner nonReentrant { 
-
         require(newOwner != address(0), "New owner cannot be zero address"); 
         emit OwnershipTransferred(owner, newOwner); 
         owner = newOwner; 
     }
-
 
     function stake(uint256 amountInBaseUnits) external nonReentrant {
         require(amountInBaseUnits > 0, "Amount must be greater than zero");
         require(balanceOf[msg.sender] >= amountInBaseUnits, "Insufficient balance");
 
         StakerInfo storage info = stakerInfo[msg.sender];
-
         uint256 fee = (amountInBaseUnits * transactionFeeRate) / 10000;
         uint256 amountAfterFee = amountInBaseUnits - fee;
 
@@ -414,11 +337,10 @@ contract Crown is ReentrancyGuard {
 
         balanceOf[owner] += ownerFee;
         rewardPool += rewardPoolFee;
-
         info.stakedAmount += amountAfterFee;
         info.lastClaimedTime = block.timestamp;
-
         balanceOf[msg.sender] -= amountInBaseUnits;
+
         emit Staked(msg.sender, amountAfterFee);
     }
 
@@ -436,7 +358,6 @@ contract Crown is ReentrancyGuard {
 
         balanceOf[owner] += ownerFee;
         rewardPool += poolFee;
-
         rewardPool -= rewards;
         balanceOf[msg.sender] += rewardsAfterFee;
 
@@ -453,7 +374,6 @@ contract Crown is ReentrancyGuard {
         uint256 rewards = getPendingRewards(msg.sender);
         if (rewards > 0) {
             require(rewardPool >= rewards, "Insufficient reward pool");
-
             uint256 fee = (rewards * transactionFeeRate) / 10000;
             uint256 rewardsAfterFee = rewards - fee;
 
@@ -462,7 +382,6 @@ contract Crown is ReentrancyGuard {
 
             balanceOf[owner] += ownerFee;
             rewardPool += poolFee;
-
             rewardPool -= rewards;
             balanceOf[msg.sender] += rewardsAfterFee;
             info.totalClaimedRewards += rewardsAfterFee;
@@ -471,7 +390,6 @@ contract Crown is ReentrancyGuard {
 
         uint256 amountToUnstake = info.stakedAmount;
         balanceOf[msg.sender] += amountToUnstake;
-
         info.stakedAmount = 0;
         info.lastClaimedTime = 0;
 
@@ -484,28 +402,22 @@ contract Crown is ReentrancyGuard {
 
         uint256 timeElapsed = block.timestamp - info.lastClaimedTime;
         uint256 pendingRewards = (info.stakedAmount * DAILY_REWARD_RATE * timeElapsed) / (10000 * 1 days);
-
         return pendingRewards;
     }
 
     function updateDailyRewardRate(uint256 newRate) external onlyOwner {
         require(newRate > 0 && newRate <= 100, "Reward rate must be between 0 and 1%"); 
-    
         uint256 oldRate = DAILY_REWARD_RATE; 
         DAILY_REWARD_RATE = newRate; 
-
         emit DailyRewardRateUpdated(oldRate, newRate);
     }
 
-
     function addValidator() external nonReentrant { 
-
         for (uint256 i = 0; i < validators.length; i++) { 
             require(validators[i].validatorAddress != msg.sender, "Already a validator"); 
         }
     
         require(balanceOf[msg.sender] >= 1000 * (10 ** uint256(decimals)), "Must stake 1000 tokens to become a validator"); 
-    
         balanceOf[msg.sender] -= 1000 * (10 ** uint256(decimals));
 
         validators.push(Validator({
@@ -518,16 +430,12 @@ contract Crown is ReentrancyGuard {
     }
 
     function removeValidator() external nonReentrant { 
-
         for (uint256 i = 0; i < validators.length; i++) { 
-
             uint256 currentPrice = _getCurrentTokenPrice(); 
             emit TokenPriceUpdated(currentPrice); 
 
             if (validators[i].validatorAddress == msg.sender) {
-
                 uint256 rewardsToDistribute = validators[i].rewards; 
-
                 balanceOf[msg.sender] += validators[i].stake;
 
                 uint256 rewardPoolShare = rewardsToDistribute * 20 / 100; 
@@ -549,7 +457,6 @@ contract Crown is ReentrancyGuard {
 
                 validators[i] = validators[validators.length - 1]; 
                 validators.pop(); 
-
                 emit ValidatorRemoved(msg.sender); 
                 return; 
             }
@@ -558,9 +465,7 @@ contract Crown is ReentrancyGuard {
     }
 
     function withdrawRewards() external nonReentrant {
-
         uint256 totalRewards = 0; 
-
         uint256 currentPrice = _getCurrentTokenPrice(); 
         emit TokenPriceUpdated(currentPrice); 
 
@@ -574,12 +479,10 @@ contract Crown is ReentrancyGuard {
 
         require(totalRewards > 0, "No rewards to withdraw"); 
         balanceOf[msg.sender] += totalRewards; 
-
         emit RewardsWithdrawn(msg.sender, totalRewards); 
     }
 
     function getValidators() external view returns (address[] memory, uint256[] memory, uint256[] memory) {
-
         address[] memory addresses = new address[](validators.length); 
         uint256[] memory stakes = new uint256[](validators.length); 
         uint256[] memory rewards = new uint256[](validators.length); 
@@ -589,10 +492,8 @@ contract Crown is ReentrancyGuard {
             stakes[i] = validators[i].stake; 
             rewards[i] = validators[i].rewards; 
         }
-
         return (addresses, stakes, rewards); 
     }
-
 
     function createLoan(uint256 collateralWei, uint256 duration) external payable nonReentrant hasNoActiveLoan {
         require(collateralWei > 0, "Collateral must be greater than zero");
@@ -607,7 +508,6 @@ contract Crown is ReentrancyGuard {
         require(reserveTokens >= maxLoanAmount, "Not enough tokens in reserve");
 
         _updateTokenPriceForLoan(maxLoanAmount, true);
-
         reserveTokens -= maxLoanAmount;
         balanceOf[msg.sender] += maxLoanAmount;
         totalSoldTokens += maxLoanAmount;
@@ -621,7 +521,6 @@ contract Crown is ReentrancyGuard {
         });
 
         collateralReserveETH += collateralWei; 
-
         emit LoanCreated(msg.sender, collateralWei, maxLoanAmount);
         emit Transfer(address(0), msg.sender, maxLoanAmount);
     }
@@ -691,22 +590,18 @@ contract Crown is ReentrancyGuard {
         emit TokenPriceUpdated(currentPrice);
 
         uint256 collateralWeiToDistribute = loan.collateralWei;
-
         uint256 reserveShareInWei = (collateralWeiToDistribute * 90) / 100; 
         uint256 ownerShareInWei = collateralWeiToDistribute - reserveShareInWei; 
 
         require(address(this).balance >= ownerShareInWei, "Insufficient contract balance to send ETH to owner");
 
         collateralReserveETH -= collateralWeiToDistribute;
-
         reserveETH += reserveShareInWei;
 
         (bool sent, ) = payable(msg.sender).call{value: ownerShareInWei}("");
         require(sent, "Failed to send ETH to owner");
 
         emit EthTransferAttempted(msg.sender, ownerShareInWei, sent);
-        require(sent, "Failed to send ETH to owner");
-
         loan.isActive = false;
         delete loans[borrower];
 
@@ -715,14 +610,11 @@ contract Crown is ReentrancyGuard {
 
     function updateDailyInterestRate(uint256 newRate) external onlyOwner { 
         require(newRate > 0 && newRate <= 100, "Reward rate must be between 0 and 1%"); 
-
         dailyInterestRate = newRate; 
         emit DailyInterestRateUpdated(newRate); 
     }
 
-
     function createUserLoan(uint256 _loanAmount, uint256 _interestRate, uint256 _loanDuration) external nonReentrant { 
-
         require(userLoans[msg.sender].isActive == false, "Existing loan must be repaid first"); 
 
         uint256 currentPrice = _getCurrentTokenPrice(); 
@@ -747,13 +639,11 @@ contract Crown is ReentrancyGuard {
     }
     
     function activateUserLoan(address lenderAddress, uint256 collateralAmount) external nonReentrant {
-
         UserLoan storage loan = userLoans[lenderAddress]; 
         require(loan.lender != address(0), "No active loan found for this lender"); 
         require(!loan.isActive, "Loan is already active");
 
         uint256 collateralAmountInBaseUnits = collateralAmount; 
-
         uint256 currentPrice = _getCurrentTokenPrice(); 
         emit TokenPriceUpdated(currentPrice); 
 
@@ -778,14 +668,12 @@ contract Crown is ReentrancyGuard {
     }
 
     function getLoanByBorrower(address _borrower) external view returns (UserLoan memory) {
-
         address lender = borrowerToLender[_borrower]; 
         require(lender != address(0), "No loan found for this borrower"); 
         return userLoans[lender]; 
     }
   
     function repayUserLoan() external nonReentrant {
-
         address lenderAddress = borrowerToLender[msg.sender]; 
         require(lenderAddress != address(0), "No active loan for this borrower"); 
 
@@ -802,7 +690,6 @@ contract Crown is ReentrancyGuard {
 
         loan.collateralTokens -= totalInterest; 
         balanceOf[lenderAddress] += totalInterest; 
-
         balanceOf[msg.sender] -= loan.loanAmount; 
         balanceOf[lenderAddress] += loan.loanAmount; 
 
@@ -821,7 +708,6 @@ contract Crown is ReentrancyGuard {
     }
     
     function liquidateUserLoanByLender(address borrower) external nonReentrant {
-
         UserLoan storage loan = userLoans[borrower]; 
         require(loan.isActive, "No active loan to liquidate"); 
         require(loan.lender == msg.sender, "Only lender can liquidate this loan"); 
@@ -830,7 +716,6 @@ contract Crown is ReentrancyGuard {
         require(block.timestamp > loanEndTime, "Loan term has not yet expired"); 
 
         uint256 collateral = loan.collateralTokens; 
-
         uint256 lenderShare = (collateral * 98) / 100; 
         uint256 ownerShare = (collateral * 1) / 100;  
         uint256 rewardPoolShare = (collateral * 1) / 100; 
@@ -849,26 +734,21 @@ contract Crown is ReentrancyGuard {
     }
 
     function cancelUserLoan() external nonReentrant {
-
         UserLoan storage loan = userLoans[msg.sender]; 
         require(!loan.isActive, "Cannot cancel an active loan"); 
         require(loan.lender == msg.sender, "Only lender can cancel their loan"); 
 
         balanceOf[address(this)] -= loan.loanAmount; 
         balanceOf[msg.sender] += loan.loanAmount; 
-
         delete userLoans[msg.sender]; 
 
         emit UserLoanCancelled(msg.sender); 
     }
 
-
     function transferRewardPoolToReserve(uint256 amount) external onlyOwner {
-
         require(amount <= rewardPool, "Insufficient tokens in reward pool"); 
 
         uint256 fee = (amount * 1) / 100; 
-
         uint256 amountAfterFee = amount - fee; 
 
         rewardPool -= amount; 
@@ -879,11 +759,9 @@ contract Crown is ReentrancyGuard {
     }
 
     function transferReserveToRewardPool(uint256 amount) external onlyOwner {
-
         require(amount <= reserveTokens, "Insufficient tokens in reserve"); 
 
         uint256 fee = (amount * 1) / 100; 
-
         uint256 amountAfterFee = amount - fee; 
 
         reserveTokens -= amount; 
@@ -892,7 +770,6 @@ contract Crown is ReentrancyGuard {
 
         emit Transfer(address(this), owner, fee);
     }
-
 
     receive() external payable {
         reserveETH += msg.value;
