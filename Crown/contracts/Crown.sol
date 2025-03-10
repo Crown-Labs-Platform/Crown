@@ -250,10 +250,10 @@ contract Crown is ReentrancyGuard {
         uint256 currentPrice = _getCurrentTokenPrice(); 
         emit TokenPriceUpdated(currentPrice); 
 
-        uint256 fee = (amountInBaseUnits * 1) / 100; // 1% poplatek
+        uint256 fee = (amountInBaseUnits * 1) / 100; 
         uint256 amountAfterFee = amountInBaseUnits - fee; 
 
-        uint256 ownerFee = (fee * 15) / 100; // Oprava: z fee, ne z celku
+        uint256 ownerFee = (fee * 15) / 100; 
         uint256 rewardPoolFee = (fee * 50) / 100; 
         uint256 validatorsFee = (fee * 35) / 100; 
 
