@@ -224,7 +224,7 @@ contract Crown is ReentrancyGuard {
         }
 
         reserveETH -= ethAmount;
-        reserveTokens += tokensAfterFee; // Oprava: pouze tokensAfterFee
+        reserveTokens += tokensAfterFee;
         balanceOf[msg.sender] -= tokenAmountInBaseUnits;
         totalSoldTokens -= tokensAfterFee;
 
