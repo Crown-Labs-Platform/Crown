@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-// Rozhraní pro Chainlink oracle (pro získání ceny USD)
 interface AggregatorV3Interface {
     function latestRoundData() external view returns (
         uint80 roundId,
@@ -12,7 +11,6 @@ interface AggregatorV3Interface {
     );
 }
 
-// Rozhraní pro ERC-20 tokeny
 interface IERC20 {
     function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
     function transfer(address recipient, uint256 amount) external returns (bool);
@@ -181,7 +179,6 @@ contract CUSD {
         return (adjustedAmount * getTokenPriceUSD(token)) / 10**18;
     }
 
-    // Pomocná funkce pro výpočet poplatku
     function calculateFeeAmount(uint256 amount, address feeToken) internal view returns (uint256) {
         uint256 requiredFee = (amount * mintingFeePercentage) / 10**18;
         uint8 feeDecimals = (feeToken == address(0)) ? 18 : IERC20(feeToken).decimals();
@@ -196,7 +193,6 @@ contract CUSD {
         require(supportedCollateralTokens[collateralToken], "Unsupported collateral token");
         require(supportedTokens[feeToken], "Unsupported fee token");
 
-        // Kolaterál
         uint256 collateralValueUSD = calculateCollateralValueUSD(collateralToken, collateralAmount);
         require(collateralValueUSD >= amount, "Insufficient collateral value");
 
@@ -208,11 +204,9 @@ contract CUSD {
             collateral[msg.sender][collateralToken] += collateralAmount;
         }
 
-        // Aktualizace cached hodnoty
         cachedCollateralValue += collateralValueUSD;
         require(cachedCollateralValue >= totalSupply + amount, "Insufficient collateral for stability");
 
-        // Poplatek
         uint256 adjustedFeeAmount = calculateFeeAmount(amount, feeToken);
         require(feeAmount >= adjustedFeeAmount, "Insufficient fee amount");
 
